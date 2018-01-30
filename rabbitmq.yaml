@@ -1,0 +1,167 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: rabbitmq-serviceaccount
+imagePullSecrets:
+- name: privateregistrykey
+---
+apiVersion: rbac.authorization.k8s.io/v1beta1
+kind: Role
+metadata:
+  name: rabbitmq-role
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+      - pods
+      - secrets
+    verbs:
+      - get
+  - apiGroups:
+      - ""
+    resources:
+      - endpoints
+    verbs:
+      - get
+---
+apiVersion: rbac.authorization.k8s.io/v1beta1
+kind: RoleBinding
+metadata:
+  name: rabbitmq-role-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: rabbitmq-role
+subjects:
+  - kind: ServiceAccount
+    name: rabbitmq-serviceaccount
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rabbitmq-config
+data:
+  enabled_plugins: |
+      [rabbitmq_management,rabbitmq_peer_discovery_consul].
+
+  rabbitmq.conf: |
+      ## Clustering
+      cluster_formation.peer_discovery_backend  = rabbit_peer_discovery_consul
+      cluster_formation.consul.host = 192.168.1.8
+      cluster_formation.consul.port = 8500
+      cluster_formation.consul.scheme = http
+      cluster_formation.consul.svc = myrabbitmq
+
+      cluster_formation.consul.svc_addr_auto = true
+      # cluster_formation.consul.svc_addr_nic = eth0
+      cluster_formation.consul.svc_addr_use_nodename = true
+
+      cluster_formation.node_cleanup.interval = 10
+      cluster_formation.node_cleanup.only_log_warning = false
+      # cluster_partition_handling = autoheal
+      ## queue master locator
+      # queue_master_locator=min-masters
+      ## enable guest user
+      loopback_users.guest = false
+      cluster_formation.consul.use_longname = true
+---
+apiVersion: apps/v1beta1
+kind: StatefulSet
+metadata:
+  name: rabbitmq
+spec:
+  replicas: 3
+  serviceName: rabbitmq
+  template:
+    metadata:
+      labels:
+        com.wise2c.app: rabbitmq
+    spec:
+      serviceAccountName: rabbitmq-serviceaccount
+      hostNetwork: true
+      tolerations:
+      - key: "node-role.kubernetes.io/master"
+        operator: "Equal"
+        value: ""
+        effect: "NoSchedule"
+      containers:
+      - name: rabbitmq
+        image: rabbitmq:3.7
+        imagePullPolicy: IfNotPresent
+        env:
+          - name: RABBITMQ_DEFAULT_PASS
+            value: wise2c
+          - name: RABBITMQ_DEFAULT_USER
+            value: wise2c
+          - name: RABBITMQ_USE_LONGNAME
+            value: "true"
+          - name: HOSTNAME
+            valueFrom:
+             fieldRef:
+              fieldPath: status.podIP
+          - name: MY_POD_IP
+            valueFrom:
+             fieldRef:
+              fieldPath: status.podIP
+          - name: RABBITMQ_NODENAME
+            value: "rabbit@$(MY_POD_IP)"
+          - name: K8S_SERVICE_NAME
+            value: "rabbitmq"
+          - name: RABBITMQ_ERLANG_COOKIE
+            value: I7AZyP8KGMuDLnRgS7ntr5EFZhkOPOngyLnmynICLiQ=
+        resources:
+          requests:
+            cpu: 1000m
+            memory: 512Mi
+        ports:
+          - name: port3
+            protocol: TCP
+            containerPort: 15671
+          - name: http
+            protocol: TCP
+            containerPort: 15672
+          - name: port1
+            protocol: TCP
+            containerPort: 25672
+          - name: port2
+            protocol: TCP
+            containerPort: 4369
+          - name: port0
+            protocol: TCP
+            containerPort: 5671
+          - name: amqp
+            protocol: TCP
+            containerPort: 5672
+        volumeMounts:
+          - name: config-volume
+            mountPath: /etc/rabbitmq
+        livenessProbe:
+          exec:
+            command: ["rabbitmqctl", "status"]
+          initialDelaySeconds: 30
+          timeoutSeconds: 10
+        readinessProbe:
+          exec:
+            command: ["rabbitmqctl", "status"]
+          initialDelaySeconds: 10
+          timeoutSeconds: 10
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 1
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    com.wise2c.app: rabbitmq
+      volumes:
+        - name: config-volume
+          configMap:
+            name: rabbitmq-config
+            items:
+            - key: rabbitmq.conf
+              path: rabbitmq.conf
+            - key: enabled_plugins
+              path: enabled_plugins
